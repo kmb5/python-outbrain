@@ -17,22 +17,21 @@ class OutbrainAmplifyApi(object):
         self.base_url = outbrain_config['base_url']
         if not self.base_url.endswith('/'):
             self.base_url += '/'
+        self.locale = pytz.timezone("Europe/Berlin")  # Outbrain's reporting is in Eastern time
 
+    def authorize(self):
         self.token = self.get_token(self.user, self.password)
-        self.locale = pytz.timezone("US/Eastern")  # Outbrain's reporting is in Eastern time
 
     def _request(self, path, params={}, data={}, method='GET'):
         if method not in ['GET', 'POST', 'PUT', 'DELETE']:
             raise ValueError('Illegal HTTP method {}'.format(method))
 
         url = self.base_url + path
-
         request_func = getattr(requests, method.lower())
 
         headers = {'OB-TOKEN-V1': self.token,
                    'Content-Type': 'application/json'}
         r = request_func(url, headers=headers, params=params, data=data)
-
         if 200 <= r.status_code < 300:
             return json.loads(r.text)
         return None
@@ -42,7 +41,10 @@ class OutbrainAmplifyApi(object):
         basic_auth = requests.auth.HTTPBasicAuth(user, password)
         r = requests.get(token_url, auth=basic_auth)
         results = json.loads(r.text)
-        return results['OB-TOKEN-V1']
+        if r.status_code != 429:
+            return results['OB-TOKEN-V1']
+        else:
+            raise OSError("Too many requests!")
 
     # ----------------------------------------------------------------------------------------------
     # Methods to acquire marketer information
@@ -171,13 +173,13 @@ class OutbrainAmplifyApi(object):
     # ----------------------------------------------------------------------------------------------
     # Methods to acquire specific performance information
     # ----------------------------------------------------------------------------------------------
-    def get_campaign_performace_per_promoted_link(self, campaign_ids, start_day, end_day):
+    def get_campaign_performace_per_promoted_link(self, marketing_id, campaign_ids, start_day, end_day):
         """
         :returns: dict[campaign_id][publisher_id] = performance_data
         """
         performance = dict()
         for c in campaign_ids:
-            path = 'campaigns/{0}/performanceByPromotedLink'.format(c)
+            path = 'reports/marketers/{0}/campaings/{0}/periodicContent'.format(marketing_id, c)
             performance[c] = dict()
             result = self._page_performance_data(path, start_day, end_day)
             for data in result:
@@ -190,7 +192,7 @@ class OutbrainAmplifyApi(object):
         """
         performance = dict()
         for c in campaign_ids:
-            path = 'campaigns/{0}/performanceByPublisher'.format(c)
+            path = 'reports/marketers/{0}/campaigns/publishers'.format(c)
             performance[c] = dict()
             result = self._page_performance_data(path, start_day, end_day)
             for data in result:
@@ -203,12 +205,21 @@ class OutbrainAmplifyApi(object):
         """
         performance = dict()
         for m in marketer_ids:
-            path = 'marketers/{0}/performanceBySection'.format(m)
+            path = 'reports/marketers/{0}/sections'.format(m)
             performance[m] = dict()
             result = self._page_performance_data(path, start_day, end_day)
             for data in result:
                 performance[m][data['id']] = data
         return performance
+
+    def get_campaign_performance_per_period(self,marketer_ids, start_day, end_day, breakdown):
+        performance = list()
+        for m in marketer_ids:
+            path = 'reports/marketers/{0}/campaigns/periodic'.format(m)
+            result = self._page_performance_data(path,start_day, end_day, breakdown)
+            performance.append(result)
+        return performance
+
 
     def get_publisher_performace_per_marketer(self, marketer_ids, start_day, end_day):
         """
@@ -216,7 +227,7 @@ class OutbrainAmplifyApi(object):
         """
         performance = dict()
         for m in marketer_ids:
-            path = 'marketers/{0}/performanceByPublisher'.format(m)
+            path = 'reports/marketers/{0}/platforms'.format(m)
             performance[m] = dict()
             result = self._page_performance_data(path, start_day, end_day)
             for data in result:
@@ -239,32 +250,38 @@ class OutbrainAmplifyApi(object):
     # ----------------------------------------------------------------------------------------------
     # "Private" helper methods for acquiring/paging performance information
     # ----------------------------------------------------------------------------------------------
-    def _page_performance_data(self, path, start, end):
+    def _page_performance_data(self, path, start, end, breakdown=None):
         result = []
         offset = 0
 
-        performance = self._get_performance_data(path, start, end, 50, offset)
-        while performance:
-            result.extend(performance)
-
-            offset += len(performance)
-            performance = self._get_performance_data(path, start, end, 50, offset)
+        performance = self._get_performance_data(path, start, end, 50, offset, breakdown)
+        result.append(performance)
         return result
 
-    def _get_performance_data(self, path, start, end, limit, offset):
+    def _get_performance_data(self, path, start, end, limit, offset, breakdown=None):
         if not start.tzinfo:
             start = start.replace(tzinfo=pytz.UTC)
         if not end.tzinfo:
             end = end.replace(tzinfo=pytz.UTC)
         start = start.astimezone(self.locale)
         end = end.astimezone(self.locale)
-
-        params = {'limit': limit,
+        if breakdown:
+            params = {'limit': limit,
+                      'offset': offset,
+                      'from': start.strftime('%Y-%m-%d'),
+                      'to': end.strftime('%Y-%m-%d'),
+                      'breakdown': breakdown}
+        else:
+            params = {'limit': limit,
                   'offset': offset,
                   'from': start.strftime('%Y-%m-%d'),
                   'to': end.strftime('%Y-%m-%d')}
         result = self._request(path, params)
-        return result.get('details', [])
+        try:
+            return result.get("campaignResults")
+        except:
+            return None
+
 
     # ----------------------------------------------------------------------------------------------
     # Methods to acquire promoted link information
